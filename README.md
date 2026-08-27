@@ -26,12 +26,17 @@ their own build / data-pipeline / gate steps.
    ```yaml
    deploy:
      needs: [build]
-     uses: lailarallc/reusable-workflows/.github/workflows/pages-deploy.yml@main
+     uses: lailarallc/reusable-workflows/.github/workflows/pages-deploy.yml@v1
      with:
        project_name: slotmath      # the Cloudflare Pages project name, explicit
        artifact_name: site
      secrets: inherit
    ```
+
+Always pin `@v1` — never `@main`. The `v1` tag is the versioned contract:
+editing this workflow and moving the tag is a deliberate, logged fleet event
+(like the frame's releases), so a shared-workflow change can never silently
+alter every fleet deploy at once. Breaking changes cut a new major (`v2`).
 
 The artifact's *contents* become the site root, so `path: web/build` in step 1
 deploys `web/build/*` at the root — no `deploy_subdir` needed.
