@@ -1,0 +1,111 @@
+name: Reusable · Cloudflare Pages deploy
+
+# Org-level reusable deploy job for the Lailara fleet. Covers the DEPLOY step
+# ONLY — credential check, create-project-if-missing, and `wrangler pages
+# deploy`. Callers keep their own pre-steps (build, data pipelines, gates) and
+# hand this workflow the finished static site as an uploaded artifact.
+#
+# The caller must:
+#   1. Build the site in its own job and upload the output directory with
+#      actions/upload-artifact under a known `artifact_name`.
+#   2. Call this workflow from a job with `needs: [<build-job>]`, passing
+#      `secrets: inherit` so the org-level CLOUDFLARE_* secrets flow through.
+#
+# Actions are pinned to a full commit SHA (tag in the trailing comment): this
+# job holds deploy credentials, and a mutable @vN could be moved onto different
+# code. Bump the SHA and the comment together. npx pins wrangler by npm major.
+
+on:
+  workflow_call:
+    inputs:
+      project_name:
+        description: "Cloudflare Pages project name (NOT necessarily the repo name)."
+        required: true
+        type: string
+      artifact_name:
+        description: "Name of the build artifact the caller uploaded (its contents are the site root)."
+        required: true
+        type: string
+      production_branch:
+        description: "Pages production branch."
+        required: false
+        type: string
+        default: "main"
+      wrangler_major:
+        description: "wrangler npm major to pin via npx."
+        required: false
+        type: string
+        default: "4"
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare Pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download the built site
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: __site
+
+      - name: Confirm Cloudflare credentials are present and well-formed
+        # An absent token makes wrangler fail with an auth error that looks like
+        # a bad token rather than a missing one; a pasted account ID with a
+        # trailing newline stays non-empty but malformed (wrangler then errors
+        # 7003). Catch both here. Neither value is echoed. If these are empty,
+        # the caller almost certainly forgot `secrets: inherit`.
+        env:
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=0
+          if [ -z "$CF_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN is empty. Pass 'secrets: inherit' from the caller so the org secret flows through."
+            missing=1
+          fi
+          if [ -z "$CF_ACCOUNT_ID" ]; then
+            echo "::error::CLOUDFLARE_ACCOUNT_ID is empty. Pass 'secrets: inherit' from the caller."
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          if ! printf '%s' "$CF_ACCOUNT_ID" | grep -Eq '^[0-9a-f]{32}$'; then
+            echo "::error::CLOUDFLARE_ACCOUNT_ID is set but not a 32-char hex account ID (likely a stray newline). Re-set it."
+            exit 1
+          fi
+          echo "cloudflare credentials present and account id well-formed"
+
+      - name: Create the Pages project if it does not exist
+        # First deploy needs the project; later deploys skip. `project list` is
+        # tolerant (a fresh account lists nothing); a real auth failure surfaces
+        # here. Project name is passed EXPLICITLY by the caller so a repo name
+        # never leaks onto the *.pages.dev URL.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if npx --yes "wrangler@${{ inputs.wrangler_major }}" pages project list | grep -q "${{ inputs.project_name }}"; then
+            echo "Pages project '${{ inputs.project_name }}' already exists"
+          else
+            npx --yes "wrangler@${{ inputs.wrangler_major }}" pages project create "${{ inputs.project_name }}" \
+              --production-branch="${{ inputs.production_branch }}"
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx --yes "wrangler@${{ inputs.wrangler_major }}" pages deploy __site \
+            --project-name="${{ inputs.project_name }}" \
+            --branch="${{ inputs.production_branch }}"
